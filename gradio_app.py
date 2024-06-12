@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ['HF_HOME'] = os.path.join(os.path.dirname(__file__), 'hf_download')
 HF_TOKEN = None
@@ -276,13 +277,28 @@ def diffusion_fn(chatbot, canvas_outputs, num_samples, seed, image_width, image_
         image.save(image_path)
         chatbot = chatbot + [(None, (image_path, 'image'))]
 
-    return chatbot
+    latest_image_path = image_path  # Save the latest image path
+
+    # Update the gallery with the last 9 images
+    gallery_images = sorted([os.path.join(gradio_temp_dir, f) for f in os.listdir(gradio_temp_dir) if f.endswith('.png')], key=os.path.getmtime, reverse=True)[:9]
+
+    return chatbot, latest_image_path, gallery_images
+
+def regenerate_last_image(chatbot, canvas_state, num_samples, image_width, image_height, highres_scale, steps, cfg, highres_steps, highres_denoise, n_prompt):
+    seed = np.random.randint(0, 2**32 - 1)
+    return diffusion_fn(chatbot, canvas_state, num_samples, seed, image_width, image_height, highres_scale, steps, cfg, highres_steps, highres_denoise, n_prompt)
 
 with gr.Blocks() as demo:
+    with gr.Accordion(label="Images", open=True):
+        with gr.Tab(label="Latest Image"):
+            latest_image = gr.Image(label="Latest Image", visible=True, height=512, width=768)  # Add the image component at the top with specified height and width, and fit the image
+        with gr.Tab(label="Last 9 Images"):
+            gallery = gr.Gallery(label="Last 9 Images", rows=3)
     with gr.Row():
         clear_btn = gr.Button("➕ New Chat", variant="secondary", size="sm")
         retry_btn = gr.Button("Retry", variant="secondary", size="sm", visible=False)
         undo_btn = gr.Button("✏️️ Edit Last Input", variant="secondary", size="sm", interactive=False)
+        regenerate_btn = gr.Button("🔄 Regenerate Last Image", variant="secondary", size="sm")
     with gr.Accordion("Settings", open=False):
         with gr.Tab(label='Language Model'):
             seed = gr.Number(label="Random Seed", value=12345, precision=0)
@@ -292,7 +308,7 @@ with gr.Blocks() as demo:
         with gr.Tab(label='Image Diffusion Model'):
             image_width = gr.Slider(label="Image Width", minimum=256, maximum=2048, value=896, step=64)
             image_height = gr.Slider(label="Image Height", minimum=256, maximum=2048, value=1152, step=64)
-            num_samples = gr.Slider(label="Image Number", minimum=1, maximum=12, value=1, step=1)
+            num_samples = gr.Slider(label="Image Number", minimum=3, maximum=12, value=1, step=1)
             steps = gr.Slider(label="Sampling Steps", minimum=1, maximum=100, value=25, step=1)
         with gr.Tab(label='Advanced'):
             cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=5.0, step=0.01)
@@ -300,12 +316,24 @@ with gr.Blocks() as demo:
             highres_steps = gr.Slider(label="Highres Fix Steps", minimum=1, maximum=100, value=20, step=1)
             highres_denoise = gr.Slider(label="Highres Fix Denoise", minimum=0.1, maximum=1.0, value=0.4, step=0.01)
             n_prompt = gr.Textbox(label="Negative Prompt", value='lowres, bad anatomy, bad hands, cropped, worst quality')
-    with gr.Tab(label="Chat"):
+    with gr.Accordion(label="Chat", open=True):
         render_button = gr.Button("Render the Image!", size='lg', variant="primary", visible=False)
         examples = gr.Dataset(samples=[['generate an image of the fierce battle of warriors and a dragon'], ['change the dragon to a dinosaur']], components=[gr.Textbox(visible=False)], label='Quick Prompts')
         with gr.Column(scale=75):
             canvas_state = gr.State(None)
-            chatbot = gr.Chatbot(label='Omost', scale=1, show_copy_button=True, layout="panel", render=False)
+            chatbot = gr.Chatbot(label='Omost', show_copy_button=True, layout="panel", render=False)
             chatInterface = ChatInterface(fn=chat_fn, post_fn=post_chat, post_fn_kwargs=dict(inputs=[chatbot], outputs=[canvas_state, render_button, undo_btn]), pre_fn=lambda: gr.update(visible=False), pre_fn_kwargs=dict(outputs=[render_button]), chatbot=chatbot, retry_btn=retry_btn, undo_btn=undo_btn, clear_btn=clear_btn, additional_inputs=[seed, temperature, top_p, max_new_tokens], examples=examples)
-    render_button.click(fn=diffusion_fn, inputs=[chatInterface.chatbot, canvas_state, num_samples, seed, image_width, image_height, highres_scale, steps, cfg, highres_steps, highres_denoise, n_prompt], outputs=[chatInterface.chatbot]).then(fn=lambda x: x, inputs=[chatInterface.chatbot], outputs=[chatInterface.chatbot_state])
+    render_button.click(fn=diffusion_fn, inputs=[chatInterface.chatbot, canvas_state, num_samples, seed, image_width, image_height, highres_scale, steps, cfg, highres_steps, highres_denoise, n_prompt], outputs=[chatInterface.chatbot, latest_image, gallery]).then(fn=lambda x: x, inputs=[chatInterface.chatbot], outputs=[chatInterface.chatbot_state])
+    regenerate_btn.click(fn=regenerate_last_image, inputs=[chatInterface.chatbot, canvas_state, num_samples, image_width, image_height, highres_scale, steps, cfg, highres_steps, highres_denoise, n_prompt], outputs=[chatInterface.chatbot, latest_image, gallery])
+
+    # Add event listener to automatically click the render button when it becomes visible
+    def check_render_button_visibility():
+        while True:
+            if render_button.visible:
+                render_button.click()
+                break
+            time.sleep(0.1)  # Check every 100ms
+
+    Thread(target=check_render_button_visibility).start()
+
 if __name__ == "__main__": demo.queue().launch(inbrowser=True, server_name='0.0.0.0', server_port=7910)
